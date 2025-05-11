@@ -471,3 +471,4 @@ execute = do
     Just (_, Ntoksdef) -> do a <- toksdefCommand
                              runLocalAssignment a
                              execute
+    Just (_, Ninputlineno) -> throwError "You can't use `\\inputlineno' in current mode"

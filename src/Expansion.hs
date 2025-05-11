@@ -204,6 +204,8 @@ expand Eifcase _ = ifcaseCommand
 expand Eor self = map fromPlainToken <$> orCommand self
 expand Eunless _ = unlessCommand
 expand Ethe _ = map fromPlainToken <$> theCommand
+expand Eendinput _ = endinputCommand
+expand Escantokens _ = scantokensCommand
 
 (<??>) :: Monad m => m (Maybe a) -> m a -> m a
 (<??>) action e = do r <- action
@@ -809,6 +811,11 @@ getQuantity Ntoks = Just $ QToks $ do
 getQuantity (DefinedToks i) = Just $ QToks $ do
   LocalState { toksReg } <- getLocalState
   pure $ Map.findWithDefault [] i toksReg
+getQuantity Ninputlineno = Just $ QInteger $ do
+  is <- gets inputStack
+  pure $ case is of
+    [] -> 0
+    (_, InputState { lineNo }):_ -> toInteger lineNo
 getQuantity _ = Nothing
 
 -- 対応する\elseまたは\fiまでスキップする
@@ -1069,3 +1076,41 @@ theCommand = do
       map charToToken . show . value <$> m
     Just (QToks m) -> m
     Nothing -> throwError "\\the"
+
+endinputCommand :: M [EToken]
+endinputCommand = do
+  currentStack <- gets inputStack
+  case currentStack of
+    [] -> pure ()
+    (ts, is):stack -> do
+      let is' = is { Input.lines = case Input.lines is of
+                       l:_ -> [l]
+                       [] -> []
+                   }
+      modify $ \s -> s { inputStack = (ts, is'):stack }
+  pure []
+
+scantokensCommand :: M [EToken]
+scantokensCommand = do
+  content <- readGeneralTextWithoutExpansion
+  text <- Show.run $ mconcat $ map Show.showToken content
+  LocalState { catcodeMap, endlinechar, newlinechar } <- getLocalState
+  let inputContext = InputContext { catcodeMap = catcodeMap, endlinechar = endlinechar }
+  let text' = T.pack text
+      lines' = if isUnicodeScalarValue newlinechar then
+                 T.split (== chr newlinechar) text'
+               else
+                 [text']
+      lines'' = if [""] `isSuffixOf` lines' then
+                    init lines'
+                else
+                    lines'
+      lines''' = map (T.dropWhileEnd (== ' ')) lines''
+      inputState = newInputState inputContext lines'''
+  currentInputStack <- gets inputStack
+  limit <- asks maxInputStack
+  when (length currentInputStack >= limit) $
+    throwError "Input stack limit"
+  modify $ \s ->
+    s { inputStack = ([], inputState):currentInputStack }
+  pure []
