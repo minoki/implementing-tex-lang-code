@@ -196,6 +196,13 @@ expand Estring _ = map fromPlainToken <$> stringCommand
 expand Enumber _ = map fromPlainToken <$> numberCommand
 expand Eromannumeral _ =
   map fromPlainToken <$> romannumeralCommand
+expand (BooleanConditional b) _ =
+  expandBooleanConditional (evalBooleanConditional b)
+expand Eelse self = map fromPlainToken <$> elseCommand self
+expand Efi self = map fromPlainToken <$> fiCommand self
+expand Eifcase _ = ifcaseCommand
+expand Eor self = map fromPlainToken <$> orCommand self
+expand Eunless _ = unlessCommand
 
 (<??>) :: Monad m => m (Maybe a) -> m a -> m a
 (<??>) action e = do r <- action
@@ -795,3 +802,250 @@ getQuantity Nnewlinechar = Just $ QIntVariable $ do
     }
 getQuantity Nnumexpr = Just $ QInteger numexprCommand
 getQuantity _ = Nothing
+
+-- 対応する\elseまたは\fiまでスキップする
+-- \elseに遭遇した場合はTrueを、\fiに遭遇した場合はFalseを返す
+-- 引数は追加でスキップするネストの深さ
+skipUntilElse :: Int -> M Bool
+skipUntilElse = disallowingOuter . go where
+  go :: Int -> M Bool
+  go level = do
+    (_, v) <- nextETokenWithoutExpansion <??> throwError "Unexpected end of input"
+    case v of
+      Expandable Eor | level == 0 -> throwError "Extra \\or"
+      Expandable Eelse | level == 0 -> pure True
+      Expandable Efi | level == 0 -> pure False
+                     | otherwise -> go (level - 1)
+      Expandable e | isConditional e -> go (level + 1)
+      _ -> go level
+
+-- 対応する\fiまでスキップする
+skipUntilFi :: M ()
+skipUntilFi = disallowingOuter $ go 0 where
+  go :: Int -> M ()
+  go level = do
+    (_, v) <- nextETokenWithoutExpansion <??> throwError "Unexpected end of input"
+    case v of
+      Expandable Efi | level == 0 -> pure ()
+                     | otherwise -> go (level - 1)
+      Expandable e | isConditional e -> go (level + 1)
+      _ -> go level
+
+data SkipUntilOr = FoundOr | FoundElse | FoundFi
+
+-- 対応する\orまたは\elseまたは\fiまでスキップする
+-- 遭遇したトークンの種類を返す
+-- 引数は追加でスキップするネストの深さ
+skipUntilOr :: Int -> M SkipUntilOr
+skipUntilOr = disallowingOuter . go where
+  go :: Int -> M SkipUntilOr
+  go level = do
+    (_, v) <- nextETokenWithoutExpansion <??> throwError "Unexpected end of input"
+    case v of
+      Expandable Eor | level == 0 -> pure FoundOr
+      Expandable Eelse | level == 0 -> pure FoundElse
+      Expandable Efi | level == 0 -> pure FoundFi
+                     | otherwise -> go (level - 1)
+      Expandable e | isConditional e -> go (level + 1)
+      _ -> go level
+
+-- \if系の命令を判別する補助関数
+isConditional :: Expandable -> Bool
+isConditional (BooleanConditional _) = True
+isConditional Eifcase = True
+isConditional _ = False
+
+-- 条件分岐スタックの指定した位置の値を置き換える
+updateConditionalStack :: Int -> ConditionalKind -> M ()
+updateConditionalStack i k = do
+  cs <- gets conditionalStack
+  case splitAt (length cs - i - 1) cs of
+    (cs0, CondTest : cs1) -> modify' $
+      \s -> s { conditionalStack = cs0 ++ k : cs1 }
+    _ -> throwError "Unmatched conditional"
+
+expandBooleanConditional :: M Bool -> M [EToken]
+expandBooleanConditional condition = do
+  -- 条件分岐スタックにCondTestを積む
+  cs0 <- gets conditionalStack
+  modify' $ \s -> s { conditionalStack = CondTest : cs0 }
+  b <- condition
+  if b then
+    -- 条件が真：
+    -- 積んだ値をCondTruthyに変える
+    updateConditionalStack (length cs0) CondTruthy
+  else do
+    -- 条件が偽：対応する\elseか\fiまでスキップする
+    -- 条件部の展開により条件分岐のネストが深くなっている可能性も考慮する
+    cs1 <- gets conditionalStack
+    e <- skipUntilElse (length cs1 - length cs0 - 1)
+    if e then
+      -- スキップの結果、\elseに遭遇した
+      -- 積んだ値をCondFalsyに変える
+      modify' $ \s -> s { conditionalStack = CondFalsy : cs0 }
+    else do
+      -- スキップの結果、\fiに遭遇した
+      -- 積んだCondTestを取り除く
+      -- 条件部の展開により\ifのネストが深くなっているかもしれないので
+      -- 単に「一番上の値を取り除く」のではダメ
+      modify' $ \s -> s { conditionalStack = cs0 }
+  -- 展開結果は空のトークン列となる
+  pure []
+
+evalBooleanConditional :: BooleanConditional -> M Bool
+evalBooleanConditional Bif = ifCommand
+evalBooleanConditional Bifcat = ifcatCommand
+evalBooleanConditional Bifcsname = ifcsnameCommand
+evalBooleanConditional Bifdefined = ifdefinedCommand
+evalBooleanConditional Biffalse = iffalseCommand
+evalBooleanConditional Bifincsname = ifincsnameCommand
+evalBooleanConditional Bifnum = ifnumCommand
+evalBooleanConditional Bifodd = ifoddCommand
+evalBooleanConditional Biftrue = iftrueCommand
+evalBooleanConditional Bifx = ifxCommand
+
+elseCommand :: Token -> M [Token]
+elseCommand self = do
+  cs <- gets conditionalStack
+  case cs of
+    CondTruthy : css -> do
+      -- \iftrue ... >>>\else<<< ... \fi
+      skipUntilFi
+      modify' $ \s -> s { conditionalStack = css }
+      pure []
+    CondCase : css -> do
+      -- \ifcase ... \or ... >>>\else<<< ... \fi
+      skipUntilFi
+      modify' $ \s -> s { conditionalStack = css }
+      pure []
+    CondTest : _ -> do
+      -- 条件部で\elseが使われた：frozen relaxを挿入する
+      -- 例えば、'\ifodd1\else\fi' の一回展開は '\relax \else \fi' となる
+      pure [TFrozenRelax, self]
+    _ -> throwError "Extra \\else"
+
+fiCommand :: Token -> M [Token]
+fiCommand self = do
+  cs <- gets conditionalStack
+  case cs of
+    [] -> throwError "Extra \\fi"
+    CondTest : _ -> do
+      -- 条件部で\fiが使われた：frozen relaxを挿入する
+      -- 例えば、'\ifodd1\fi' の一回展開は '\relax \fi' となる
+      pure [TFrozenRelax, self]
+    _ : css -> do
+      modify' $ \s -> s { conditionalStack = css }
+      pure []
+
+orCommand :: Token -> M [Token]
+orCommand self = do
+  cs <- gets conditionalStack
+  case cs of
+    CondCase : css -> do
+      -- \ifcase N ... >>>\or<<< ... \fi
+      skipUntilFi
+      modify' $ \s -> s { conditionalStack = css }
+      pure []
+    CondTest : _ -> do
+      -- 条件部で\orが使われた：frozen relaxを挿入する
+      -- 例えば、'\ifcase0\or\fi' の一回展開は '\relax \or \fi' となる
+      pure [TFrozenRelax, self]
+    _ -> throwError "Extra \\or"
+
+iftrueCommand, iffalseCommand :: M Bool
+iftrueCommand = pure True
+iffalseCommand = pure False
+
+ifxCommand :: M Bool
+ifxCommand = allowingOuter $ do
+  (_, v1) <- nextETokenWithoutExpansion <??> throwError "Unexpected end of input"
+  (_, v2) <- nextETokenWithoutExpansion <??> throwError "Unexpected end of input"
+  pure $ v1 == v2
+
+-- Used by \if and \ifcat
+getCharCodeAndCatCode :: (EToken, Unexpandable)
+                      -> Maybe (Char, CatCode)
+getCharCodeAndCatCode (_, Character c cc)
+  = Just (c, cc) -- explicit or implicit character token
+getCharCodeAndCatCode (EToken { token = TCommandName (ActiveChar c), notexpanded = True }, _)
+  = Just (c, CCActive) -- \noexpand-ed active character
+getCharCodeAndCatCode _ = Nothing
+
+-- \if: test character codes
+ifCommand :: M Bool
+ifCommand = disallowingOuter $ do
+  t1 <- nextExpandedEToken <??> throwError "Unexpected end of input"
+  t2 <- nextExpandedEToken <??> throwError "Unexpected end of input"
+  pure $ fmap fst (getCharCodeAndCatCode t1)
+           == fmap fst (getCharCodeAndCatCode t2)
+
+-- \ifcat: test category codes
+ifcatCommand :: M Bool
+ifcatCommand = disallowingOuter $ do
+  t1 <- nextExpandedEToken <??> throwError "Unexpected end of input"
+  t2 <- nextExpandedEToken <??> throwError "Unexpected end of input"
+  pure $ fmap snd (getCharCodeAndCatCode t1)
+           == fmap snd (getCharCodeAndCatCode t2)
+
+ifoddCommand :: M Bool
+ifoddCommand = odd <$> readNumber
+
+ifnumCommand :: M Bool
+ifnumCommand = do a <- readNumber
+                  rel <- readRelation
+                  b <- readNumber
+                  pure $ rel == compare a b
+  where
+    readRelation = do
+      m <- nextExpandedToken <??> throwError "Unexpected end of input"
+      case m of
+        -- (implicit) space: ignored
+        (_, Character _ CCSpace) -> readRelation
+        (TCharacter '<' CCOther, _) -> pure LT
+        (TCharacter '=' CCOther, _) -> pure EQ
+        (TCharacter '>' CCOther, _) -> pure GT
+        _ -> throwError "invalid relation for \\ifnum"
+
+ifcaseCommand :: M [EToken]
+ifcaseCommand = do
+  cs <- gets conditionalStack
+  modify' $ \s -> s { conditionalStack = CondTest : cs }
+  x <- readNumber
+  let go 0 _ = updateConditionalStack (length cs) CondCase
+      go n extraLevel = do
+        k <- skipUntilOr extraLevel
+        case k of
+          FoundFi ->
+            modify' $ \s -> s { conditionalStack = cs }
+          FoundElse ->
+            modify' $ \s -> s { conditionalStack = CondFalsy : cs }
+          FoundOr -> do
+            modify' $ \s -> s { conditionalStack = CondTest : cs }
+            go (n - 1) 0
+  -- 条件部の展開により条件分岐のネストが深くなっている可能性を考慮する
+  cs1 <- gets conditionalStack
+  go x (length cs1 - length cs - 1)
+  pure []
+
+ifdefinedCommand :: M Bool
+ifdefinedCommand = do
+  (_, v) <- allowingOuter nextETokenWithoutExpansion <??> throwError "Unexpected end of input"
+  pure $ v /= Expandable Undefined
+
+ifcsnameCommand :: M Bool
+ifcsnameCommand = do
+  name <- readUntilEndcsname
+  v <- lookupCommand (ControlSeq name)
+  pure $ v /= Expandable Undefined
+
+unlessCommand :: M [EToken]
+unlessCommand = do
+  (t, v) <- nextETokenWithoutExpansion <??> throwError "Unexpected end of input"
+  case v of
+    Expandable (BooleanConditional b) ->
+      expandBooleanConditional
+        (not <$> evalBooleanConditional b)
+    _ -> throwError $ "You can't use `\\unless' before `" ++ show t ++ "'"
+
+ifincsnameCommand :: M Bool
+ifincsnameCommand = asks isincsname
