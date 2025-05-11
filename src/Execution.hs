@@ -76,6 +76,12 @@ doPrefix p = do
       runPrefixAssignment (p .&. globalPrefix) a
     Just (_, Ngdef) -> do a <- defCommand p
                           runGlobalAssignment a
+    Just (_, Nedef) -> do
+      a <- edefCommand p
+      runPrefixAssignment (p .&. globalPrefix) a
+    Just (_, Nxdef) -> do
+      a <- edefCommand p
+      runGlobalAssignment a
     Just (_, m) -> throwError $ "You can't use a prefix with " ++ show m
     Nothing -> throwError "Unexpected end of input after a prefix"
 
@@ -141,6 +147,9 @@ isParam commandMap (TCommandName name) =
     _ -> False
 isParam _ TFrozenRelax = False
 
+edefCommand :: Prefix -> M Assignment
+edefCommand = defOrEdefCommand edefReadUntilEndGroup
+
 data ExecutionResult = ERCharacter Char
                      | ERBeginGroup
                      | EREndGroup
@@ -198,5 +207,11 @@ execute = do
                          runLocalAssignment a
                          execute
     Just (_, Ngdef) -> do a <- defCommand noPrefix
+                          runGlobalAssignment a
+                          execute
+    Just (_, Nedef) -> do a <- edefCommand noPrefix
+                          runLocalAssignment a
+                          execute
+    Just (_, Nxdef) -> do a <- edefCommand noPrefix
                           runGlobalAssignment a
                           execute

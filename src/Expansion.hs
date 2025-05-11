@@ -186,6 +186,9 @@ expand (Macro { long, delimiterBeforeFirstParam, paramSpec, replacement }) name 
   let goReplacement (RToken t) = [t]
       goReplacement (RPlaceholder i) = args !! i
   pure $ map fromPlainToken $ concatMap goReplacement replacement
+expand Eexpanded _ = map fromPlainToken <$> expandedCommand
+expand Eunexpanded _ =
+  map fromPlainToken <$> unexpandedCommand
 
 (<??>) :: Monad m => m (Maybe a) -> m a -> m a
 (<??>) action e = do r <- action
@@ -358,6 +361,68 @@ readArgument allowPar paramSpec@(ParamSpec { delimiter = [] }) = do
     _ -> pure [t]
 readArgument allowPar (ParamSpec { delimiter })
   = readDelimitedArgument allowPar delimiter
+
+edefReadUntilEndGroup :: M [Token]
+edefReadUntilEndGroup = disallowingOuter $ loop 0 [] where
+  loop :: Int -> [Token] -> M [Token]
+  loop level revTokens = do
+    (EToken { depth = d, token = t }, m)
+      <- nextETokenWithoutExpansion <??> throwError "expected '}', but got EOF"
+    case (t, m) of
+      (TCharacter _ CCEndGroup, _)
+        | level == 0 -> pure $ reverse revTokens
+        | otherwise -> loop (level - 1) (t : revTokens)
+      (TCharacter _ CCBeginGroup, _) ->
+        loop (level + 1) (t : revTokens)
+      (_, Expandable e) -> do
+        u <- expandInEdef e t
+        case u of
+          Nothing -> do
+            -- 通常：再帰的に展開する
+            p <- expand e t
+            unreadTokens (d + 1) p
+            loop level revTokens
+          Just p ->
+            -- 一部の命令：再帰的な展開は行わない
+            loop level (reverse p ++ revTokens)
+      (_, Unexpandable _) -> loop level (t : revTokens)
+
+expandInEdef :: Expandable -> Token -> M (Maybe [Token])
+expandInEdef Eunexpanded _ = Just <$> unexpandedCommand
+expandInEdef (Macro { protected = True }) t =
+  pure $ Just [t]
+-- 後で\theに対する処理を追加する
+-- ...
+expandInEdef _ _ = pure Nothing
+
+readFillerAndLBrace :: M ()
+readFillerAndLBrace = disallowingOuter loop where
+  loop :: M ()
+  loop = do
+    (t, v) <- nextExpandedToken <??> throwError "reached EOF while looking for <general text>"
+    case v of
+      Character _ CCBeginGroup ->
+        pure () -- explicit or implicit left brace
+      Nrelax {} -> loop -- \relax: ignored
+      Character _ CCSpace ->
+        loop -- optional spaces: ignored
+      _ -> throwError $ "got " ++ show t ++ " while looking for <general text>" -- Missing { inserted
+
+readGeneralTextWithoutExpansion :: M [Token]
+readGeneralTextWithoutExpansion = do
+  readFillerAndLBrace
+  readUntilEndGroup AllowPar
+
+unexpandedCommand :: M [Token]
+unexpandedCommand = readGeneralTextWithoutExpansion
+
+readExpandedGeneralText :: M [Token]
+readExpandedGeneralText = do
+  readFillerAndLBrace
+  edefReadUntilEndGroup
+
+expandedCommand :: M [Token]
+expandedCommand = readExpandedGeneralText
 
 enter :: ScopeType -> M ()
 enter st = modify $
