@@ -115,6 +115,15 @@ doPrefix p = do
     Just (_, Nnewlinechar) -> do
       a <- newlinecharCommand
       runPrefixAssignment p a
+    Just (_, DefinedToks i) -> do
+      a <- definedToksCommand i
+      runPrefixAssignment p a
+    Just (_, Ntoks) -> do
+      a <- toksCommand
+      runPrefixAssignment p a
+    Just (_, Ntoksdef) -> do
+      a <- toksdefCommand
+      runPrefixAssignment p a
     Just (_, m) -> throwError $ "You can't use a prefix with " ++ show m
     Nothing -> throwError "Unexpected end of input after a prefix"
 
@@ -318,6 +327,29 @@ definedCountCommand i = do
   newValue <- readNumber
   pure $ Assign $ \s@(LocalState { countReg }) -> s { countReg = Map.insert i newValue countReg }
 
+toksCommand :: M Assignment
+toksCommand = do
+  i <- readRegisterCode
+  readExpandedEquals
+  newValue <- readGeneralTextWithoutExpansion
+  pure $ Assign $ \s@(LocalState { toksReg }) ->
+    s { toksReg = Map.insert i newValue toksReg }
+
+toksdefCommand :: M Assignment
+toksdefCommand = do
+  name <- readCommandName
+  runLocalAssignment $ assignCommand name $ Unexpandable $ Nrelax False
+  readExpandedEquals
+  i <- readRegisterCode
+  pure $ assignCommand name $ Unexpandable $ DefinedToks i
+
+definedToksCommand :: Int -> M Assignment
+definedToksCommand i = do
+  readExpandedEquals
+  newValue <- readGeneralTextWithoutExpansion
+  pure $ Assign $ \s@(LocalState { toksReg }) ->
+    s { toksReg = Map.insert i newValue toksReg }
+
 data ExecutionResult = ERCharacter Char
                      | ERBeginGroup
                      | EREndGroup
@@ -430,3 +462,12 @@ execute = do
       runLocalAssignment a
       execute
     Just (_, Nnumexpr) -> throwError "You can't use `\\numexpr' in current mode"
+    Just (_, DefinedToks i) -> do a <- definedToksCommand i
+                                  runLocalAssignment a
+                                  execute
+    Just (_, Ntoks) -> do a <- toksCommand
+                          runLocalAssignment a
+                          execute
+    Just (_, Ntoksdef) -> do a <- toksdefCommand
+                             runLocalAssignment a
+                             execute

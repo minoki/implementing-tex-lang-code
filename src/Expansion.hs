@@ -203,6 +203,7 @@ expand Efi self = map fromPlainToken <$> fiCommand self
 expand Eifcase _ = ifcaseCommand
 expand Eor self = map fromPlainToken <$> orCommand self
 expand Eunless _ = unlessCommand
+expand Ethe _ = map fromPlainToken <$> theCommand
 
 (<??>) :: Monad m => m (Maybe a) -> m a -> m a
 (<??>) action e = do r <- action
@@ -406,7 +407,7 @@ expandInEdef Eunexpanded _ = Just <$> unexpandedCommand
 expandInEdef (Macro { protected = True }) t =
   pure $ Just [t]
 -- 後で\theに対する処理を追加する
--- ...
+expandInEdef Ethe _ = Just <$> theCommand
 expandInEdef _ _ = pure Nothing
 
 readFillerAndLBrace :: M ()
@@ -801,6 +802,13 @@ getQuantity Nnewlinechar = Just $ QIntVariable $ do
         \s -> s { newlinechar = newValue }
     }
 getQuantity Nnumexpr = Just $ QInteger numexprCommand
+getQuantity Ntoks = Just $ QToks $ do
+  i <- readRegisterCode
+  LocalState { toksReg } <- getLocalState
+  pure $ Map.findWithDefault [] i toksReg
+getQuantity (DefinedToks i) = Just $ QToks $ do
+  LocalState { toksReg } <- getLocalState
+  pure $ Map.findWithDefault [] i toksReg
 getQuantity _ = Nothing
 
 -- 対応する\elseまたは\fiまでスキップする
@@ -1049,3 +1057,15 @@ unlessCommand = do
 
 ifincsnameCommand :: M Bool
 ifincsnameCommand = asks isincsname
+
+theCommand :: M [Token]
+theCommand = do
+  (_, v) <- nextExpandedEToken <??> throwError "\\the"
+  case getQuantity v of
+    Just (QInteger m) -> map charToToken . show <$> m
+    Just (QIntegerVariable m) ->
+      map charToToken . show . value <$> m
+    Just (QIntVariable m) ->
+      map charToToken . show . value <$> m
+    Just (QToks m) -> m
+    Nothing -> throwError "\\the"
