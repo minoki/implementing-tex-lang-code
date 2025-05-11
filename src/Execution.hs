@@ -124,6 +124,12 @@ doPrefix p = do
     Just (_, Ntoksdef) -> do
       a <- toksdefCommand
       runPrefixAssignment p a
+    Just (_, Nlccode) -> do
+      a <- lccodeCommand
+      runPrefixAssignment p a
+    Just (_, Nuccode) -> do
+      a <- uccodeCommand
+      runPrefixAssignment p a
     Just (_, m) -> throwError $ "You can't use a prefix with " ++ show m
     Nothing -> throwError "Unexpected end of input after a prefix"
 
@@ -350,6 +356,66 @@ definedToksCommand i = do
   pure $ Assign $ \s@(LocalState { toksReg }) ->
     s { toksReg = Map.insert i newValue toksReg }
 
+lccodeCommand :: M Assignment
+lccodeCommand = do
+  c <- readCharacterCode
+  readExpandedEquals
+  newValue <- readCharacterCode
+  pure $ Assign $ \s@(LocalState { lccodeMap }) ->
+    s { lccodeMap = Map.insert c newValue lccodeMap }
+
+uccodeCommand :: M Assignment
+uccodeCommand = do
+  c <- readCharacterCode
+  readExpandedEquals
+  newValue <- readCharacterCode
+  pure $ Assign $ \s@(LocalState { uccodeMap }) ->
+    s { uccodeMap = Map.insert c newValue uccodeMap }
+
+-- 引数次第で\lowercase/\uppercaseの処理を実行する
+lowerupperCommand :: (LocalState -> Char -> Char)
+                  -> EToken -> M ()
+lowerupperCommand getCode et = do
+  text <- readGeneralTextWithoutExpansion
+  ls <- getLocalState
+  let mapChar c = let d = getCode ls c
+                  in if d == '\0' then c else d
+      mapToken (TCharacter c cc) = TCharacter (mapChar c) cc
+      mapToken (TCommandName (ActiveChar c)) =
+        TCommandName (ActiveChar (mapChar c))
+      mapToken x = x
+      text' = map (fromPlainToken . mapToken) text
+  -- 無限ループ阻止のため、トークンの深さを維持する
+  unreadTokens (depth et + 1) text'
+
+ignorespacesCommand :: M ()
+ignorespacesCommand = do
+  m <- nextExpandedEToken
+  case m of
+    Just (_, Character _ CCSpace) -> ignorespacesCommand
+    Just (t, _) -> unreadToken t -- keep 'notexpanded' flag
+    Nothing -> pure ()
+
+showCommand :: M String
+showCommand = do
+  (t, v) <- allowingOuter nextTokenWithoutExpansion <??> throwError "\\show"
+  let s = case t of
+        TCharacter _ _ -> Show.meaning True v
+        TCommandName n -> Show.showCommandName n <> const "=" <> Show.meaning True v
+        TFrozenRelax -> Show.showCommandName (ControlSeq "relax") <> const "=" <> Show.meaning True v
+  Show.run $ const "> " <> s <> const "."
+
+showtheCommand :: M String
+showtheCommand = do
+  (_, v) <- nextExpandedEToken <??> throwError "\\showthe"
+  s <- case getQuantity v of
+    Just (QInteger m) -> const . show <$> m
+    Just (QIntegerVariable m) -> const . show . value <$> m
+    Just (QIntVariable m) -> const . show . value <$> m
+    Just (QToks m) -> mconcat . map Show.showToken <$> m
+    Nothing -> throwError "\\showthe"
+  Show.run $ const "> " <> s <> const "."
+
 data ExecutionResult = ERCharacter Char
                      | ERBeginGroup
                      | EREndGroup
@@ -472,3 +538,22 @@ execute = do
                              runLocalAssignment a
                              execute
     Just (_, Ninputlineno) -> throwError "You can't use `\\inputlineno' in current mode"
+    Just (_, Nlccode) -> do
+      a <- lccodeCommand
+      runLocalAssignment a
+      execute
+    Just (_, Nuccode) -> do
+      a <- uccodeCommand
+      runLocalAssignment a
+      execute
+    Just (t, Nlowercase) -> do
+      lowerupperCommand (getLccode . lccodeMap) t
+      execute
+    Just (t, Nuppercase) -> do
+      lowerupperCommand (getUccode . uccodeMap) t
+      execute
+    Just (_, Nignorespaces) -> do
+      ignorespacesCommand
+      execute
+    Just (_, Nshow) -> Just . ERMessage <$> showCommand
+    Just (_, Nshowthe) -> Just . ERMessage <$> showtheCommand

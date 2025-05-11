@@ -132,3 +132,17 @@ data Quantity m
   --   QGlue: <internal glue>
   --   QMuGlue: <internal muglue>
   -- を追加する
+
+-- 対応表を使って\lccodeの値を計算する
+getLccode :: Map Char Char -> Char -> Char
+getLccode m c = Map.findWithDefault def c m
+  where def = if isLetter c
+              then toLower c
+              else '\0'
+
+-- 対応表を使って\uccodeの値を計算する
+getUccode :: Map Char Char -> Char -> Char
+getUccode m c = Map.findWithDefault def c m
+  where def = if isLetter c
+              then toUpper c
+              else '\0'

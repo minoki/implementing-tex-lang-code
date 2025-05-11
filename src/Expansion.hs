@@ -206,6 +206,7 @@ expand Eunless _ = unlessCommand
 expand Ethe _ = map fromPlainToken <$> theCommand
 expand Eendinput _ = endinputCommand
 expand Escantokens _ = scantokensCommand
+expand Emeaning _ = map fromPlainToken <$> meaningCommand
 
 (<??>) :: Monad m => m (Maybe a) -> m a -> m a
 (<??>) action e = do r <- action
@@ -816,6 +817,14 @@ getQuantity Ninputlineno = Just $ QInteger $ do
   pure $ case is of
     [] -> 0
     (_, InputState { lineNo }):_ -> toInteger lineNo
+getQuantity Nlccode = Just $ QInteger $ do
+  c <- readCharacterCode
+  LocalState { lccodeMap } <- getLocalState
+  pure $ toInteger $ ord $ getLccode lccodeMap c
+getQuantity Nuccode = Just $ QInteger $ do
+  c <- readCharacterCode
+  LocalState { uccodeMap } <- getLocalState
+  pure $ toInteger $ ord $ getUccode uccodeMap c
 getQuantity _ = Nothing
 
 -- 対応する\elseまたは\fiまでスキップする
@@ -1114,3 +1123,8 @@ scantokensCommand = do
   modify $ \s ->
     s { inputStack = ([], inputState):currentInputStack }
   pure []
+
+meaningCommand :: M [Token]
+meaningCommand = do
+  (_, v) <- allowingOuter nextETokenWithoutExpansion <??> throwError "\\meaning"
+  map charToToken <$> Show.run (Show.meaning False v)
