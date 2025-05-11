@@ -193,6 +193,9 @@ expand Ecsstring _ = map fromPlainToken <$> csstringCommand
 expand Edetokenize _ =
   map fromPlainToken <$> detokenizeCommand
 expand Estring _ = map fromPlainToken <$> stringCommand
+expand Enumber _ = map fromPlainToken <$> numberCommand
+expand Eromannumeral _ =
+  map fromPlainToken <$> romannumeralCommand
 
 (<??>) :: Monad m => m (Maybe a) -> m a -> m a
 (<??>) action e = do r <- action
@@ -481,3 +484,314 @@ detokenizeCommand :: M [Token]
 detokenizeCommand = do
   toks <- readGeneralTextWithoutExpansion
   map charToToken <$> Show.run (mconcat $ map Show.showToken toks)
+
+-- <optional signs>とその直後の展開不能トークンを読み取り、
+-- 符号（±1）、展開不能トークン、展開不能命令を返す
+readOptionalSigns :: Integer -- 引数は±1
+                  -> M (Integer, Token, Unexpandable)
+readOptionalSigns s = do
+  x <- nextExpandedToken <??> throwError "Unexpected end of input"
+  case x of
+    (TCharacter '+' CCOther, _) -> readOptionalSigns s
+    (TCharacter '-' CCOther, _) -> readOptionalSigns (-s)
+    (_, Character _ CCSpace) ->
+      readOptionalSigns s -- space: ignored
+    (t, v) -> pure (s, t, v)
+
+readNumber :: M Integer
+readNumber = do
+  (sign, t, v) <- readOptionalSigns 1
+  (sign *) <$> case t of
+    TCharacter '\'' CCOther -> readUnsignedOctal
+    TCharacter '"' CCOther -> readUnsignedHex
+    TCharacter '`' CCOther -> readCharacterAsCode
+    TCharacter c CCOther | isDigit c ->
+      readUnsignedDecimalInteger $ toInteger $ digitToInt c
+    _ -> case getQuantity v of
+      Just (QInteger getInteger) -> getInteger
+      Just (QIntegerVariable var) -> value <$> var
+      Just (QIntVariable var) -> toInteger . value <$> var
+      _ -> throwError $ "Unexpected token while reading a number: " ++ show t -- Missing number, treated as zero.
+
+-- 十進表記を読み取る。引数は最初の数字
+readUnsignedDecimalInteger :: Integer -> M Integer
+readUnsignedDecimalInteger = readGenericInteger 10 isDigit
+
+-- 八進表記を読み取る
+readUnsignedOctal :: M Integer
+readUnsignedOctal = do
+  (t, _) <- nextExpandedToken <??> throwError "Unexpected end of input"
+  case t of
+    TCharacter c CCOther | isOctDigit c ->
+      readGenericInteger 8 isOctDigit (toInteger $ digitToInt c)
+    _ -> throwError $ "unexpected token while reading an octal integer: " ++ show t
+
+-- 十六進表記を読み取る
+readUnsignedHex :: M Integer
+readUnsignedHex = do
+  (t, _) <- nextExpandedToken <??> throwError "Unexpected end of input"
+  case t of
+    TCharacter c CCOther
+      | isUpperHexDigit c -> go $ toInteger $ digitToInt c
+    TCharacter c CCLetter
+      | 'A' <= c, c <= 'F' -> go $ toInteger $ digitToInt c
+    _ -> throwError $ "unexpected token while reading a hexadecimal integer: " ++ show t
+  where
+    go = readGenericInteger 16 isUpperHexDigit
+    isUpperHexDigit c = isDigit c || ('A' <= c && c <= 'F')
+
+-- 十進表記または八進表記または十六進表記を読み取る
+-- 引数は基数と、数字を判定する関数と、最初の数字
+readGenericInteger :: Integer -> (Char -> Bool) -> Integer -> M Integer
+readGenericInteger base isXDigit = go where
+  go x = do
+    m <- nextExpandedEToken
+    case m of
+      Just (EToken { token = TCharacter c CCOther }, _)
+        | isXDigit c ->
+          go (base * x + toInteger (digitToInt c))
+      Just (EToken { token = TCharacter c CCLetter }, _)
+        | base == 16, 'A' <= c, c <= 'F' ->
+          go (16 * x + toInteger (digitToInt c))
+      Just (_, Character _ CCSpace) ->
+        pure x -- space: consumed
+      Just (t, _) -> do
+        -- strip 'notexpanded' flag
+        unreadToken $ t { notexpanded = False }
+        pure x
+      Nothing -> pure x
+
+readOneOptionalSpace :: M ()
+readOneOptionalSpace = do
+  m <- nextExpandedEToken
+  case m of
+    Just (_, Character _ CCSpace) ->
+      pure () -- space: consumed
+    Just (t, _) ->
+      -- strip 'notexpanded' flag
+      unreadToken $ t { notexpanded = False }
+    Nothing -> pure ()
+
+-- 文字を読む
+readCharacterAsCode :: M Integer
+readCharacterAsCode = do
+  (t, _) <- nextTokenWithoutExpansion <??> throwError "Unexpected end of input"
+  readOneOptionalSpace
+  toInteger . ord <$> case t of
+    TCommandName (ControlSeq name) -> case T.unpack name of
+      [c] -> pure c
+      _ -> throwError "Improper alphabetic constant"
+    TCommandName (ActiveChar c) -> pure c
+    TCharacter c _ -> pure c
+    TFrozenRelax ->
+      throwError "Improper alphabetic constant"
+
+readSmallInt :: M Int
+readSmallInt = do
+  v <- readNumber
+  unless (-0x7fffffff <= v && v <= 0x7fffffff) $
+    throwError "Number too big"
+  pure $ fromInteger v
+
+readCharacterCode :: M Char
+readCharacterCode = do
+  i <- readSmallInt
+  unless (isUnicodeScalarValue i) $
+    throwError "Bad character code"
+  pure $ chr i
+
+readRegisterCode :: M Int
+readRegisterCode = do
+  i <- readSmallInt
+  unless (0 <= i && i < 65536) $
+    throwError "Bad register code"
+  pure i
+
+numberCommand :: M [Token]
+numberCommand = map charToToken . show <$> readNumber
+
+romannumeralCommand :: M [Token]
+romannumeralCommand =
+  map charToToken . showRomannumeral <$> readSmallInt
+
+showRomannumeral :: Int -> String
+showRomannumeral x | x <= 0 = ""
+                   | otherwise =
+  let (e1,d1) = x `quotRem` 10
+      (e2,d2) = e1 `quotRem` 10
+      (d4,d3) = e2 `quotRem` 10
+  in replicate d4 'm' ++ (a3 !! d3) ++ (a2 !! d2) ++ (a1 !! d1)
+  where
+    a3 = ["", "c", "cc", "ccc", "cd", "d", "dc", "dcc", "dccc", "cm"]
+    a2 = ["", "x", "xx", "xxx", "xl", "l", "lx", "lxx", "lxxx", "xc"]
+    a1 = ["", "i", "ii", "iii", "iv", "v", "vi", "vii", "viii", "ix"]
+
+readExpandedEquals :: M ()
+readExpandedEquals = do
+  m <- nextExpandedEToken
+  case m of
+    Nothing -> pure () -- end of input
+    Just (_, Character _ CCSpace) ->
+      readExpandedEquals -- consume space
+    Just (EToken { token = TCharacter '=' CCOther }, _) ->
+      pure () -- consume '='
+    Just (t, _) -> unreadToken $ t { notexpanded = False }
+
+readKeyword :: String -> M Bool
+readKeyword "" = pure False -- should not occur
+readKeyword keyword@(k0:ks) = do
+  m <- nextExpandedEToken
+  case m of
+    Nothing -> pure False -- end of input
+    Just (_, Character _ CCSpace) -> 
+      readKeyword keyword
+    Just (t@EToken { token = TCharacter c _ }, _)
+      | toUpper c == toUpper k0 -> readRest [t] ks
+    Just (t, _) -> do
+      unreadToken $ t { notexpanded = False }
+      pure False
+  where
+    readRest _revAcc [] = pure True
+    readRest revAcc (k:kss) = do
+      m <- nextExpandedEToken
+      case m of
+        Just (t@EToken { token = TCharacter c _ }, _)
+          | toUpper c == toUpper k ->
+            readRest (t:revAcc) kss
+        Just (t, _) -> do
+          unreadToken $ t { notexpanded = False }
+          mapM_ unreadToken revAcc
+          pure False
+        Nothing -> do
+          mapM_ unreadToken revAcc
+          pure False
+
+readOptionalKeyword :: String -> M ()
+readOptionalKeyword keyword = void $ readKeyword keyword
+
+etexDiv :: Integer -> Integer -> Integer
+etexDiv _ 0 = error "divide by zero"
+etexDiv x y | x % y >= 0 = floor (x % y + 1/2)
+            | otherwise = ceiling (x % y - 1/2)
+
+parseExpression :: Int -> M Integer
+parseExpression level = parseTerm >>= readAddOp where
+  readAddOp :: Integer -> M Integer
+  readAddOp acc = do
+    m <- nextExpandedEToken
+    case m of
+      Nothing -> pure acc
+      Just (EToken { token = TCharacter '+' CCOther }, _) ->
+        do y <- parseTerm
+           readAddOp (acc + y)
+      Just (EToken { token = TCharacter '-' CCOther }, _) ->
+        do y <- parseTerm
+           readAddOp (acc - y)
+      Just (EToken { token = TCharacter ')' CCOther }, _)
+        | level > 0 -> pure acc
+      Just (_, Character _ CCSpace) ->
+        readAddOp acc -- consume space
+      Just (t, _) -> do
+        unreadToken t -- keep 'notexpanded' flag
+        pure acc
+
+  parseTerm = parseFactor >>= readMulOp
+
+  readMulOp :: Integer -> M Integer
+  readMulOp acc = do
+    m <- nextExpandedEToken
+    case m of
+      Nothing -> pure acc
+      Just (EToken { token = TCharacter '*' CCOther }, _) ->
+        do y <- parseIntegerFactor level
+           readMulOp (acc * y)
+      Just (EToken { token = TCharacter '/' CCOther }, _) ->
+        do y <- parseIntegerFactor level
+           if y == 0
+             then throwError "Divide by zero"
+             else readMulOp (acc `etexDiv` y)
+      Just (EToken { token = TCharacter ')' CCOther }, _)
+        | level > 0 -> pure acc
+      Just (_, Character _ CCSpace) ->
+        readMulOp acc -- consume space
+      Just (t, _) -> do
+        unreadToken t -- keep 'notexpanded' flag
+        pure acc
+  
+  parseFactor :: M Integer
+  parseFactor = do
+    (t, v) <- nextExpandedEToken <??> throwError "Unexpected end of input"
+    case (t, v) of
+      (EToken { token = TCharacter '(' CCOther }, _) ->
+        parseExpression (level + 1)
+      (_, Character _ CCSpace) -> parseFactor
+      _ -> do
+        unreadToken $ t { notexpanded = False }
+        readNumber
+
+parseIntegerFactor :: Int -> M Integer
+parseIntegerFactor level = do
+  (t, v) <- nextExpandedEToken <??> throwError "Unexpected end of input"
+  case (t, v) of
+    (EToken { token = TCharacter '(' CCOther }, _) ->
+      parseExpression (level + 1)
+    (_, Character _ CCSpace) -> parseIntegerFactor level
+    _ -> do
+      unreadToken $ t { notexpanded = False }
+      readNumber
+
+numexprCommand :: M Integer
+numexprCommand = do
+  x <- parseExpression 0
+  m <- nextExpandedEToken
+  case m of
+    Just (_, Nrelax {}) -> pure ()
+    Just (t, _) -> unreadToken t
+    _ -> pure ()
+  pure x
+
+getQuantity :: Unexpandable -> Maybe (Quantity M)
+getQuantity (DefinedCharacter c) =
+  Just $ QInteger $ pure $ toInteger $ ord c
+getQuantity Ncount = Just $ QIntegerVariable $ do
+  i <- readRegisterCode
+  LocalState { countReg = cr } <- getLocalState
+  pure $ Variable
+    { value = Map.findWithDefault 0 i cr
+    , set = \newValue -> Assign $ \s ->
+        s { countReg = Map.insert i newValue (countReg s) }
+    }
+getQuantity (DefinedCount i) = Just $ QIntegerVariable $ do
+  LocalState { countReg = cr } <- getLocalState
+  pure $ Variable
+    { value = Map.findWithDefault 0 i cr
+    , set = \newValue -> Assign $ \s ->
+        s { countReg = Map.insert i newValue (countReg s) }
+    }
+getQuantity Ncatcode = Just $ QInteger $ do
+  c <- readCharacterCode
+  LocalState { catcodeMap } <- getLocalState
+  pure $ toInteger $ fromEnum $ Input.getCatcode catcodeMap c
+getQuantity Nendlinechar = Just $ QIntVariable $ do
+  LocalState { endlinechar } <- getLocalState
+  pure $ Variable
+    { value = endlinechar
+    , set = \newValue -> Assign $
+        \s -> s { State.endlinechar = newValue }
+    }
+getQuantity Nescapechar = Just $ QIntVariable $ do
+  LocalState { escapechar } <- getLocalState
+  pure $ Variable
+    { value = escapechar
+    , set = \newValue -> Assign $
+        \s -> s { State.escapechar = newValue }
+    }
+getQuantity Nnewlinechar = Just $ QIntVariable $ do
+  LocalState { newlinechar } <- getLocalState
+  pure $ Variable
+    { value = newlinechar
+    , set = \newValue -> Assign $
+        \s -> s { newlinechar = newValue }
+    }
+getQuantity Nnumexpr = Just $ QInteger numexprCommand
+getQuantity _ = Nothing

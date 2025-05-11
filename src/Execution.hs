@@ -82,6 +82,39 @@ doPrefix p = do
     Just (_, Nxdef) -> do
       a <- edefCommand p
       runGlobalAssignment a
+    Just (_, DefinedCount i) -> do
+      a <- definedCountCommand i
+      runPrefixAssignment p a
+    Just (_, Nadvance) -> do
+      a <- advanceCommand
+      runPrefixAssignment p a
+    Just (_, Ncatcode) -> do
+      a <- catcodeCommand
+      runPrefixAssignment p a
+    Just (_, Nchardef) -> do
+      a <- chardefCommand
+      runPrefixAssignment p a
+    Just (_, Ncount) -> do
+      a <- countCommand
+      runPrefixAssignment p a
+    Just (_, Ncountdef) -> do
+      a <- countdefCommand
+      runPrefixAssignment p a
+    Just (_, Ndivide) -> do
+      a <- divideCommand
+      runPrefixAssignment p a
+    Just (_, Nendlinechar) -> do
+      a <- endlinecharCommand
+      runPrefixAssignment p a
+    Just (_, Nescapechar) -> do
+      a <- escapecharCommand
+      runPrefixAssignment p a
+    Just (_, Nmultiply) -> do
+      a <- multiplyCommand
+      runPrefixAssignment p a
+    Just (_, Nnewlinechar) -> do
+      a <- newlinecharCommand
+      runPrefixAssignment p a
     Just (_, m) -> throwError $ "You can't use a prefix with " ++ show m
     Nothing -> throwError "Unexpected end of input after a prefix"
 
@@ -150,10 +183,140 @@ isParam _ TFrozenRelax = False
 edefCommand :: Prefix -> M Assignment
 edefCommand = defOrEdefCommand edefReadUntilEndGroup
 
+chardefCommand :: M Assignment
+chardefCommand = do
+  name <- readCommandName
+  runLocalAssignment $ assignCommand name $ Unexpandable $ Nrelax False
+  readExpandedEquals
+  value <- readCharacterCode
+  pure $ assignCommand name $ Unexpandable $ DefinedCharacter value
+
+countCommand :: M Assignment
+countCommand = do
+  i <- readRegisterCode
+  readExpandedEquals
+  value <- readNumber
+  pure $ Assign $ \s@(LocalState { countReg }) ->
+    s { countReg = Map.insert i value countReg }
+
+catcodeCommand :: M Assignment
+catcodeCommand = do
+  c <- readCharacterCode
+  readExpandedEquals
+  value <- readSmallInt
+  unless (0 <= value && value <= 15) $
+    throwError "\\catcode: Invalid category code"
+  pure $ Assign $ \s@LocalState { State.catcodeMap = m } ->
+    s { State.catcodeMap = Map.insert c (toEnum value) m }
+
+endlinecharCommand :: M Assignment
+endlinecharCommand = do
+  readExpandedEquals
+  value <- readSmallInt
+  pure $ Assign $ \s -> s { endlinechar = value }
+
+escapecharCommand :: M Assignment
+escapecharCommand = do
+  readExpandedEquals
+  value <- readSmallInt
+  pure $ Assign $ \s -> s { State.escapechar = value }
+
+newlinecharCommand :: M Assignment
+newlinecharCommand = do
+  readExpandedEquals
+  value <- readSmallInt
+  pure $ Assign $ \s -> s { newlinechar = value }
+
+advanceCommand :: M Assignment
+advanceCommand = do
+  (t, v) <- nextExpandedToken <??> throwError "\\advance"
+  case getQuantity v of
+    Just (QIntegerVariable var) -> do
+      Variable { value, set } <- var
+      readOptionalKeyword "by"
+      delta <- readNumber
+      pure $ set $ value + delta
+    Just (QIntVariable var) -> do
+      Variable { value, set } <- var
+      readOptionalKeyword "by"
+      delta <- readNumber
+      let newValue = toInteger value + delta
+          minInt = toInteger (minBound :: Int)
+          maxInt = toInteger (maxBound :: Int)
+      if minInt <= newValue && newValue <= maxInt then
+        pure $ set $ fromInteger newValue
+      else
+        throwError "Arithmetic overflow"
+    _ -> throwError $ "You can't use `" ++ show t ++ "' after \\advance"
+
+multiplyCommand :: M Assignment
+multiplyCommand = do
+  (t, v) <- nextExpandedToken <??> throwError "\\multiply"
+  case getQuantity v of
+    Just (QIntegerVariable var) -> do
+      Variable { value, set } <- var
+      readOptionalKeyword "by"
+      factor <- readNumber
+      pure $ set $ value * factor
+    Just (QIntVariable var) -> do
+      Variable { value, set } <- var
+      readOptionalKeyword "by"
+      factor <- readNumber
+      let newValue = toInteger value * factor
+          minInt = toInteger (minBound :: Int)
+          maxInt = toInteger (maxBound :: Int)
+      if minInt <= newValue && newValue <= maxInt then
+        pure $ set $ fromInteger newValue
+      else
+        throwError "Arithmetic overflow"
+    _ -> throwError $ "You can't use `" ++ show t ++ "' after \\multiply"
+
+divideCommand :: M Assignment
+divideCommand = do
+  (t, v) <- nextExpandedToken <??> throwError "\\divide"
+  case getQuantity v of
+    Just (QIntegerVariable var) -> do
+      Variable { value, set } <- var
+      readOptionalKeyword "by"
+      divisor <- readNumber
+      if divisor == 0 then
+        throwError "Arithmetic overflow"
+      else
+        pure $ set $ value `quot` divisor
+    Just (QIntVariable var) -> do
+      Variable { value, set } <- var
+      readOptionalKeyword "by"
+      divisor <- readNumber
+      if divisor == 0 then
+        throwError "Arithmetic overflow"
+      else do
+        let newValue = toInteger value `quot` divisor
+            minInt = toInteger (minBound :: Int)
+            maxInt = toInteger (maxBound :: Int)
+        if minInt <= newValue && newValue <= maxInt then
+          pure $ set $ fromInteger newValue
+        else
+          throwError "Arithmetic overflow"
+    _ -> throwError $ "You can't use `" ++ show t ++ "' after \\divide"
+
 messageCommand :: M String
 messageCommand = do
   text <- readExpandedGeneralText
   Show.run $ mconcat $ map Show.showToken text
+
+countdefCommand :: M Assignment
+countdefCommand = do
+  name <- readCommandName
+  runLocalAssignment $ assignCommand name $ Unexpandable $ Nrelax False
+  readExpandedEquals
+  i <- readRegisterCode
+  pure $ assignCommand name $ Unexpandable $ DefinedCount i
+
+definedCountCommand :: Int -> M Assignment
+definedCountCommand i = do
+  readExpandedEquals
+  newValue <- readNumber
+  pure $ Assign $ \s@(LocalState { countReg }) -> s { countReg = Map.insert i newValue countReg }
 
 data ExecutionResult = ERCharacter Char
                      | ERBeginGroup
@@ -222,3 +385,48 @@ execute = do
                           execute
     Just (_, Nmessage) ->
       Just . ERMessage <$> messageCommand
+    Just (_, DefinedCount i) -> do
+      a <- definedCountCommand i
+      runLocalAssignment a
+      execute
+    Just (_, Nadvance) -> do
+      a <- advanceCommand
+      runLocalAssignment a
+      execute
+    Just (_, Ncatcode) -> do
+      a <- catcodeCommand
+      runLocalAssignment a
+      execute
+    Just (_, Nchardef) -> do
+      a <- chardefCommand
+      runLocalAssignment a
+      execute
+    Just (_, Ncount) -> do
+      a <- countCommand
+      runLocalAssignment a
+      execute
+    Just (_, Ncountdef) -> do
+      a <- countdefCommand
+      runLocalAssignment a
+      execute
+    Just (_, Ndivide) -> do
+      a <- divideCommand
+      runLocalAssignment a
+      execute
+    Just (_, Nendlinechar) -> do
+      a <- endlinecharCommand
+      runLocalAssignment a
+      execute
+    Just (_, Nescapechar) -> do
+      a <- escapecharCommand
+      runLocalAssignment a
+      execute
+    Just (_, Nmultiply) -> do
+      a <- multiplyCommand
+      runLocalAssignment a
+      execute
+    Just (_, Nnewlinechar) -> do
+      a <- newlinecharCommand
+      runLocalAssignment a
+      execute
+    Just (_, Nnumexpr) -> throwError "You can't use `\\numexpr' in current mode"

@@ -117,3 +117,18 @@ fromPlainToken t =
   EToken { depth = 0, token = t, notexpanded = False }
 
 newtype Assignment = Assign (LocalState -> LocalState)
+
+data Variable a = Variable { value :: a
+                           , set :: a -> Assignment
+                           }
+
+data Quantity m
+  = QInteger (m Integer) -- <internal integer>
+  | QIntegerVariable (m (Variable Integer)) -- <integer variable>
+  | QIntVariable (m (Variable Int)) -- <integer variable>
+  | QToks (m [Token])
+  -- 組版もやるなら
+  --   QDimension: <internal dimen>
+  --   QGlue: <internal glue>
+  --   QMuGlue: <internal muglue>
+  -- を追加する
