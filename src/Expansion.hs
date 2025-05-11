@@ -178,7 +178,14 @@ expand Enoexpand _ = noexpandCommand
 expand Ecsname _ = map fromPlainToken <$> csnameCommand
 expand Ebegincsname _ =
   map fromPlainToken <$> begincsnameCommand
--- ...
+expand (Macro { long, delimiterBeforeFirstParam, paramSpec, replacement }) name = disallowingOuter $ do
+  d <- testDelimiter [] delimiterBeforeFirstParam
+  unless d $ throwError $ "Use of " ++ show name ++ " doesn't match its definition"
+  let allowPar = if long then AllowPar else DisallowPar
+  args <- mapM (readArgument allowPar) paramSpec
+  let goReplacement (RToken t) = [t]
+      goReplacement (RPlaceholder i) = args !! i
+  pure $ map fromPlainToken $ concatMap goReplacement replacement
 
 (<??>) :: Monad m => m (Maybe a) -> m a -> m a
 (<??>) action e = do r <- action
@@ -259,6 +266,98 @@ readOneOptionalSpaceWithoutExpansion = do
     Just (_, Unexpandable (Character _ CCSpace)) ->
       pure () -- consume a space (explicit or implicit)
     Just (t, _) -> unreadToken t -- keep notexpanded flag
+
+-- 最初の引数の前のデリミター、引数指定、置換後のテキストに追加されるべきトークン列」を返す
+readParameterText :: M ([Token], [ParamSpec], [Token])
+readParameterText = disallowingOuter $ go 1 [] [] where
+  go i revParamSpecs revDelimiter = do
+    u <- nextTokenWithoutExpansion <??> throwError "Unexpected end of input"
+    case u of
+      (_, Unexpandable (Character paramChar CCParam)) -> do
+        (t2, _) <- nextTokenWithoutExpansion <??> throwError "Unexpected end of input"
+        case t2 of
+          TCharacter c CCOther
+            | isDigit c && i == digitToInt c ->
+              go (i + 1) ((paramChar, revDelimiter) : revParamSpecs) []
+          TCharacter _ CCBeginGroup -> pure $ finalize [t2] [] (t2 : revDelimiter) revParamSpecs
+          _ -> throwError "Parameters must be numbered consecutively"
+      (TCharacter _ CCBeginGroup, _) ->
+        pure $ finalize [] [] revDelimiter revParamSpecs
+      (TCharacter _ CCEndGroup, _) ->
+        throwError "Unexpected `}' while reading parameter text"
+      (t, _) -> go i revParamSpecs (t : revDelimiter)
+  -- 引数とデリミターを関連づける
+  finalize extraBrace paramSpecs revDelimiter []
+    = (reverse revDelimiter, paramSpecs, extraBrace)
+  finalize extraBrace paramSpecs revDelimiter1 ((paramChar, revDelimiter2) : xs)
+    = finalize extraBrace (ParamSpec paramChar (reverse revDelimiter1) : paramSpecs) revDelimiter2 xs
+
+data AllowPar = AllowPar | DisallowPar deriving Eq
+
+readUntilEndGroup :: AllowPar -> M [Token]
+readUntilEndGroup allowPar = disallowingOuter $ fst <$> readUntilEndGroup' allowPar
+
+-- Returns 'end group' character
+readUntilEndGroup' :: AllowPar -> M ([Token], Token)
+readUntilEndGroup' allowPar = loop 0 [] where
+  loop :: Int -> [Token] -> M ([Token], Token)
+  loop depth revTokens = do
+    (t, _) <- nextTokenWithoutExpansion <??> throwError "expected '}', but got EOF"
+    case t of
+      TCharacter _ CCEndGroup
+        | depth == 0 -> pure (reverse revTokens, t)
+        | otherwise -> loop (depth - 1) (t : revTokens)
+      TCharacter _ CCBeginGroup ->
+        loop (depth + 1) (t : revTokens)
+      TCommandName (ControlSeq "par")
+        | allowPar == DisallowPar ->
+          throwError "Paragraph ended before argument was complete"
+      _ -> loop depth (t : revTokens)
+
+testDelimiter :: [EToken] -> [Token] -> M Bool
+testDelimiter _revAcc [] = pure True
+testDelimiter revAcc (t : ts) = do
+  r <- nextETokenWithoutExpansion
+  case r of
+    Just (e@(EToken { token = u }), _)
+      | t == u -> testDelimiter (e : revAcc) ts
+      | otherwise -> mapM_ unreadToken (e : revAcc) >> pure False
+    Nothing -> mapM_ unreadToken revAcc >> pure False
+
+readDelimitedArgument :: AllowPar -> [Token] -> M [Token]
+readDelimitedArgument allowPar delimiter = loop [] where
+  loop revAcc = do
+    end <- testDelimiter [] delimiter
+    if end then
+      pure (reverse revAcc)
+    else do
+      (t, _) <- nextTokenWithoutExpansion <??> throwError "Unexpected end of input"
+      case t of
+        beginGroup@(TCharacter _ CCBeginGroup) -> do
+          (grouped, endGroup) <- readUntilEndGroup' allowPar
+          loop (endGroup : reverse grouped ++ beginGroup : revAcc)
+        TCharacter _ CCEndGroup ->
+          throwError "Argument of macro has an extra }"
+        TCommandName (ControlSeq "par")
+          | allowPar == DisallowPar ->
+            throwError "Paragraph ended before argument was complete"
+        _ -> loop (t : revAcc)
+
+readArgument :: AllowPar -> ParamSpec -> M [Token]
+readArgument allowPar paramSpec@(ParamSpec { delimiter = [] }) = do
+  (t, _) <- nextTokenWithoutExpansion <??> throwError "Unexpected end of input"
+  case t of
+    TCharacter _ CCSpace ->
+      readArgument allowPar paramSpec -- skip
+    TCharacter _ CCEndGroup ->
+      throwError "unexpected end of group"
+    TCharacter _ CCBeginGroup -> readUntilEndGroup allowPar
+    TCommandName (ControlSeq "par")
+      | allowPar == DisallowPar ->
+        throwError "Paragraph ended before argument was complete"
+    _ -> pure [t]
+readArgument allowPar (ParamSpec { delimiter })
+  = readDelimitedArgument allowPar delimiter
 
 enter :: ScopeType -> M ()
 enter st = modify $

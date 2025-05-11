@@ -71,7 +71,11 @@ doPrefix p = do
     Just (_, Nlet) -> do
       a <- letCommand
       runPrefixAssignment p a
-    -- ...
+    Just (_, Ndef) -> do
+      a <- defCommand p
+      runPrefixAssignment (p .&. globalPrefix) a
+    Just (_, Ngdef) -> do a <- defCommand p
+                          runGlobalAssignment a
     Just (_, m) -> throwError $ "You can't use a prefix with " ++ show m
     Nothing -> throwError "Unexpected end of input after a prefix"
 
@@ -91,6 +95,51 @@ futureletCommand = do
   unreadToken $ t2 { notexpanded = False }
   unreadToken $ t1 { notexpanded = False }
   pure $ assignCommand name command
+
+defCommand :: Prefix -> M Assignment
+defCommand = defOrEdefCommand (readUntilEndGroup AllowPar)
+
+defOrEdefCommand :: M [Token] -> Prefix -> M Assignment
+defOrEdefCommand readReplacementText prefix = do
+  name <- readCommandName
+  (delimiterBeforeFirstParam, paramSpec, extraBrace)
+    <- readParameterText
+  replacement <- readReplacementText
+  let numberOfParameters = length paramSpec
+  LocalState { commandMap } <- getLocalState
+  -- 展開後のテキストを処理する関数
+  let processReplacement :: [Replacement] -> [Token]
+                         -> M [Replacement]
+      processReplacement revAcc [] = pure $ reverse revAcc
+      processReplacement revAcc (t1:t2:xs)
+        | isParam commandMap t1, isParam commandMap t2
+        = processReplacement (RToken t2 : revAcc) xs
+      processReplacement revAcc (t1:TCharacter c CCOther:xs)
+        | isParam commandMap t1, isDigit c, let i = digitToInt c
+        , 1 <= i, i <= numberOfParameters
+        = processReplacement (RPlaceholder (i - 1) : revAcc) xs
+      processReplacement revAcc (t:xs)
+        | isParam commandMap t = throwError $ "Illegal parameter number in definition of " ++ show name
+        | otherwise
+        = processReplacement (RToken t : revAcc) xs
+  replacement' <- processReplacement [] replacement
+  pure $ assignCommand name $ Expandable $ Macro
+    { long = prefix .&. longPrefix /= 0
+    , outer = prefix .&. outerPrefix /= 0
+    , protected = prefix .&. protectedPrefix /= 0
+    , delimiterBeforeFirstParam = delimiterBeforeFirstParam
+    , paramSpec = paramSpec
+    , replacement = replacement' ++ map RToken extraBrace
+    }
+
+-- トークンが（明示的な、あるいは暗黙の）パラメーター文字か判別する関数
+isParam :: Map CommandName Command -> Token -> Bool
+isParam _ (TCharacter _ cc) = cc == CCParam
+isParam commandMap (TCommandName name) =
+  case Map.lookup name commandMap of
+    Just (Unexpandable (Character _ CCParam)) -> True
+    _ -> False
+isParam _ TFrozenRelax = False
 
 data ExecutionResult = ERCharacter Char
                      | ERBeginGroup
@@ -145,3 +194,9 @@ execute = do
     Just (_, Nlong) -> doPrefix longPrefix >> execute
     Just (_, Nouter) -> doPrefix outerPrefix >> execute
     Just (_, Nprotected) -> doPrefix protectedPrefix >> execute
+    Just (_, Ndef) -> do a <- defCommand noPrefix
+                         runLocalAssignment a
+                         execute
+    Just (_, Ngdef) -> do a <- defCommand noPrefix
+                          runGlobalAssignment a
+                          execute
