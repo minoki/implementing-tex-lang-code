@@ -1,0 +1,22 @@
+cabal-version:      3.0
+name:               messagetex
+version:            0.1.0.0
+license:            MIT
+license-file:       LICENSE
+copyright:          (c) 2025 ARATA Mizuki
+category:           Text
+build-type:         Simple
+
+library
+  exposed-modules:  Common
+                    Input
+  build-depends:    base >=4.16.0.0 && <4.22
+                  , bytestring >=0.11.4.0 && <0.13
+                  , text >=1.2.5.0 && <2.2
+                  , containers >=0.6.5.1 && <0.9
+                  , mtl >=2.3.1 && <2.4
+                  , transformers >=0.6.0.0 && <0.7
+                  , haskeline >=0.8.2 && <0.9
+  ghc-options: -Wall -Wcompat
+  hs-source-dirs:   src
+  default-language: GHC2021
