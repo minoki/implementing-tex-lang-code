@@ -7,11 +7,13 @@ copyright:          (c) 2025 ARATA Mizuki
 category:           Text
 build-type:         Simple
 
-library
-  exposed-modules:  Common
+executable messagetex
+  main-is:          Main.hs
+  other-modules:    Common
                     Input
                     State
                     Expansion
+                    Execution
   build-depends:    base >=4.16.0.0 && <4.22
                   , bytestring >=0.11.4.0 && <0.13
                   , text >=1.2.5.0 && <2.2

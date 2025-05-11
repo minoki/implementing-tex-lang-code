@@ -232,3 +232,30 @@ begincsnameCommand = do
   pure $ case m of
     Expandable Undefined -> [] -- empty
     _ -> [TCommandName name]
+
+enter :: ScopeType -> M ()
+enter st = modify $
+  \s@(State { localStates = localStates@(ls :| _) }) ->
+    s { localStates = ls { scopeType = st } NE.<| localStates }
+
+leave :: ScopeType -> M ()
+leave st = do
+  LocalState { scopeType } :| lss <- gets localStates
+  if scopeType == st then
+    case lss of
+      [] -> throwError ("Extra " ++ ending st) -- or "Too many }'s"
+      ls:lss' ->
+        modify $ \s -> s { localStates = ls :| lss' }
+  else
+    throwError $ "mismatched braces: begun by " ++ beginning st ++ ", ended by " ++ ending st
+  where
+    beginning ScopeByBrace      = "left brace `{'"
+    beginning ScopeByBeginGroup = "\\begingroup"
+    beginning GlobalScope       = "<beginning of input>"
+    beginning ScopeByLeftRight  = "\\left"
+    beginning ScopeByMathShift  = "`$' or `$$'"
+    ending ScopeByBrace      = "right brace `}'"
+    ending ScopeByBeginGroup = "\\endgroup"
+    ending GlobalScope       = "<end of input>"
+    ending ScopeByLeftRight  = "\\right"
+    ending ScopeByMathShift  = "`$' or `$$'"
