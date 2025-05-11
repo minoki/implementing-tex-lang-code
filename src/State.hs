@@ -111,3 +111,7 @@ data EToken = EToken { depth :: Int
                      , notexpanded :: Bool
                      }
             deriving Show
+
+fromPlainToken :: Token -> EToken
+fromPlainToken t =
+  EToken { depth = 0, token = t, notexpanded = False }
