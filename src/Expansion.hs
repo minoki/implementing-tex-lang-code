@@ -233,6 +233,33 @@ begincsnameCommand = do
     Expandable Undefined -> [] -- empty
     _ -> [TCommandName name]
 
+readCommandName :: M CommandName
+readCommandName = do
+  (t, _) <- nextTokenWithoutExpansion <??> throwError "expected a command name"
+  case t of
+    TCommandName name -> pure name
+    _ -> throwError $ "unexpected character token: " ++ show t
+
+readEqualsWithoutExpansion :: M ()
+readEqualsWithoutExpansion = do
+  m <- nextETokenWithoutExpansion
+  case m of
+    Nothing -> pure ()
+    Just (EToken { token = TCharacter '=' CCOther }, _) ->
+      pure () -- consume '='
+    Just (_, Unexpandable (Character _ CCSpace)) ->
+      readEqualsWithoutExpansion
+    Just (t, _) -> unreadToken t -- keep notexpanded flag
+
+readOneOptionalSpaceWithoutExpansion :: M ()
+readOneOptionalSpaceWithoutExpansion = do
+  m <- nextETokenWithoutExpansion
+  case m of
+    Nothing -> pure ()
+    Just (_, Unexpandable (Character _ CCSpace)) ->
+      pure () -- consume a space (explicit or implicit)
+    Just (t, _) -> unreadToken t -- keep notexpanded flag
+
 enter :: ScopeType -> M ()
 enter st = modify $
   \s@(State { localStates = localStates@(ls :| _) }) ->

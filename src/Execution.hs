@@ -14,6 +14,84 @@ import Expansion
 import State
 -- ...
 
+-- 命令名に対する代入（\letや\defなどで使う）
+assignCommand :: CommandName -> Command -> Assignment
+assignCommand name command = Assign $
+  \s@(LocalState { commandMap }) ->
+    s { commandMap = Map.insert name command commandMap }
+
+runLocalAssignment :: Assignment -> M ()
+runLocalAssignment (Assign f) = modify $
+  -- スタックの先頭だけに変更を適用する
+  \s@(State { localStates = x :| xs }) ->
+    s { localStates = f x :| xs }
+
+runGlobalAssignment :: Assignment -> M ()
+runGlobalAssignment (Assign f) = modify $
+  -- スタックの全てに変更を適用する
+  \s@(State { localStates }) ->
+    s { localStates = NE.map f localStates }
+
+-- \globalの有無で代入の範囲を切り替える(後述)
+runPrefixAssignment :: Prefix -> Assignment -> M ()
+runPrefixAssignment p a
+  | p == globalPrefix = runGlobalAssignment a
+  | p == 0 = runLocalAssignment a
+  | otherwise = throwError "You can't use `\\long' or `\\outer' or `\\protected' with an assignment."
+
+-- 前置命令の集合
+type Prefix = Word
+
+noPrefix, globalPrefix, longPrefix, outerPrefix, protectedPrefix :: Prefix
+noPrefix = 0
+globalPrefix = 1
+longPrefix = 2
+outerPrefix = 4
+protectedPrefix = 8
+
+-- 前置命令の処理。これまでに使われた前置命令の集合を引数に取る
+doPrefix :: Prefix -> M ()
+doPrefix p = do
+  et <- nextExpandedEToken
+  case et of
+    -- 前置命令が続く場合は「使われた前置命令の集合」にそれを追加する
+    Just (_, Nglobal) -> doPrefix (p .|. globalPrefix)
+    Just (_, Nlong) -> doPrefix (p .|. longPrefix)
+    Just (_, Nouter) -> doPrefix (p .|. outerPrefix)
+    Just (_, Nprotected) -> doPrefix (p .|. protectedPrefix)
+
+    -- \relaxと空白は無視する
+    Just (_, Nrelax {}) -> doPrefix p
+    Just (_, Character _ CCSpace) -> doPrefix p
+
+    -- 前置命令を使った代入を行う
+    Just (_, Nfuturelet) -> do
+      a <- futureletCommand
+      runPrefixAssignment p a
+    Just (_, Nlet) -> do
+      a <- letCommand
+      runPrefixAssignment p a
+    -- ...
+    Just (_, m) -> throwError $ "You can't use a prefix with " ++ show m
+    Nothing -> throwError "Unexpected end of input after a prefix"
+
+letCommand :: M Assignment
+letCommand = do
+  name <- readCommandName
+  readEqualsWithoutExpansion
+  readOneOptionalSpaceWithoutExpansion
+  (_, command) <- nextETokenWithoutExpansion <??> throwError "Unexpected end of input"
+  pure $ assignCommand name command
+
+futureletCommand :: M Assignment
+futureletCommand = do
+  name <- readCommandName
+  (t1, _) <- nextETokenWithoutExpansion <??> throwError "Unexpected end of input"
+  (t2, command) <- nextETokenWithoutExpansion <??> throwError "Unexpected end of input"
+  unreadToken $ t2 { notexpanded = False }
+  unreadToken $ t1 { notexpanded = False }
+  pure $ assignCommand name command
+
 data ExecutionResult = ERCharacter Char
                      | ERBeginGroup
                      | EREndGroup
@@ -57,4 +135,13 @@ execute = do
       execute
     Just (_, Nendcsname) ->
       throwError "Extra \\endcsname"
-    -- ...
+    Just (_, Nfuturelet) -> do a <- futureletCommand
+                               runLocalAssignment a
+                               execute
+    Just (_, Nglobal) -> doPrefix globalPrefix >> execute
+    Just (_, Nlet) -> do a <- letCommand
+                         runLocalAssignment a
+                         execute
+    Just (_, Nlong) -> doPrefix longPrefix >> execute
+    Just (_, Nouter) -> doPrefix outerPrefix >> execute
+    Just (_, Nprotected) -> doPrefix protectedPrefix >> execute

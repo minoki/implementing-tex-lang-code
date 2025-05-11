@@ -115,3 +115,5 @@ data EToken = EToken { depth :: Int
 fromPlainToken :: Token -> EToken
 fromPlainToken t =
   EToken { depth = 0, token = t, notexpanded = False }
+
+newtype Assignment = Assign (LocalState -> LocalState)
