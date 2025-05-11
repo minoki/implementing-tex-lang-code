@@ -12,7 +12,7 @@ import Data.List.NonEmpty qualified as NE
 import Common
 import Expansion
 import State
--- ...
+import Show
 
 -- 命令名に対する代入（\letや\defなどで使う）
 assignCommand :: CommandName -> Command -> Assignment
@@ -150,6 +150,11 @@ isParam _ TFrozenRelax = False
 edefCommand :: Prefix -> M Assignment
 edefCommand = defOrEdefCommand edefReadUntilEndGroup
 
+messageCommand :: M String
+messageCommand = do
+  text <- readExpandedGeneralText
+  Show.run $ mconcat $ map Show.showToken text
+
 data ExecutionResult = ERCharacter Char
                      | ERBeginGroup
                      | EREndGroup
@@ -215,3 +220,5 @@ execute = do
     Just (_, Nxdef) -> do a <- edefCommand noPrefix
                           runGlobalAssignment a
                           execute
+    Just (_, Nmessage) ->
+      Just . ERMessage <$> messageCommand

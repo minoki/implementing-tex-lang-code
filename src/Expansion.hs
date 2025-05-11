@@ -19,7 +19,7 @@ import Data.Text qualified as T
 import State
 import Common
 import Input
--- ...
+import Show
 
 data EContext = EContext { maxExpansionDepth :: Int
                          , maxPendingToken :: Int
@@ -189,6 +189,10 @@ expand (Macro { long, delimiterBeforeFirstParam, paramSpec, replacement }) name 
 expand Eexpanded _ = map fromPlainToken <$> expandedCommand
 expand Eunexpanded _ =
   map fromPlainToken <$> unexpandedCommand
+expand Ecsstring _ = map fromPlainToken <$> csstringCommand
+expand Edetokenize _ =
+  map fromPlainToken <$> detokenizeCommand
+expand Estring _ = map fromPlainToken <$> stringCommand
 
 (<??>) :: Monad m => m (Maybe a) -> m a -> m a
 (<??>) action e = do r <- action
@@ -450,3 +454,30 @@ leave st = do
     ending GlobalScope       = "<end of input>"
     ending ScopeByLeftRight  = "\\right"
     ending ScopeByMathShift  = "`$' or `$$'"
+
+charToToken :: Char -> Token
+charToToken ' ' = TCharacter ' ' CCSpace
+charToToken c = TCharacter c CCOther
+
+stringCommand :: M [Token]
+stringCommand = do
+  (t, _) <- allowingOuter nextTokenWithoutExpansion <??> throwError "\\string"
+  let s = case t of
+        TCommandName name -> showCommandName name
+        TCharacter c _ -> const [c]
+        TFrozenRelax -> showCommandName (ControlSeq "relax")
+  map charToToken <$> Show.run s
+
+csstringCommand :: M [Token]
+csstringCommand = do
+  (t, _) <- allowingOuter nextTokenWithoutExpansion <??> throwError "\\csstring"
+  pure $ map charToToken $ case t of
+    TCommandName (ControlSeq name) -> T.unpack name
+    TCommandName (ActiveChar c) -> [c]
+    TCharacter c _ -> [c]
+    TFrozenRelax -> "relax"
+
+detokenizeCommand :: M [Token]
+detokenizeCommand = do
+  toks <- readGeneralTextWithoutExpansion
+  map charToToken <$> Show.run (mconcat $ map Show.showToken toks)
